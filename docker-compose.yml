@@ -1,0 +1,60 @@
+version: "3"
+
+services:
+  scraper-service: &python
+    build: ./scraper
+    volumes:
+      - ./scraper:/usr/src/app/scraper/
+    ports:
+      - "5000:5000"
+    restart: on-failure
+    working_dir: /usr/src/app/scraper/
+    command: python run.py
+    links:
+      - db
+    depends_on:
+      - db
+      - rabbitmq
+      - celery_worker
+  db:
+    image: mysql:8
+    command: ['mysqld', '--default-authentication-plugin=mysql_native_password', '--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci']
+    restart: always
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./docker/provision/mysql/init:/docker-entrypoint-initdb.d/
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    security_opt:
+      - seccomp:unconfined
+
+  myadmin:
+    image: phpmyadmin/phpmyadmin
+    links:
+      - db:db
+    ports:
+      - "8081:80"
+    depends_on:
+      - db
+
+  rabbitmq:
+    image: rabbitmq:3.8.2
+    ports:
+      - "5672:5672"
+    environment:
+        - RABBITMQ_DEFAULT_USER=admin
+        - RABBITMQ_DEFAULT_PASS=mypass
+
+  celery_worker:
+    <<: *python
+    working_dir: /usr/src/app/scraper/
+    command: celery worker -A celery_worker.celery --loglevel=info
+    ports: []
+    restart: on-failure
+    links:
+      - rabbitmq
+      - db
+    depends_on:
+      - rabbitmq
+      - db
