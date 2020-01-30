@@ -20,5 +20,5 @@ class Image(db.Model):
 
 class TextContent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    text = db.Column(db.Text)
+    text = db.Column(db.Text(16777000))
     url_id = db.Column(db.Integer, db.ForeignKey('url.id'))

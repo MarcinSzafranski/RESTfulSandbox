@@ -6,6 +6,8 @@ from bs4 import BeautifulSoup
 from app import celery, db
 from app.models import TextContent, Image
 from app.schema import UrlSchema
+from app.db_utils import commit_to_database
+from celery.signals import after_task_publish
 from definitions import ROOT_DIR, IMAGES_DIR_NAME
 
 
@@ -55,30 +57,48 @@ def get_list_of_images(soup, url_object):
             with open(os.path.join(ROOT_DIR, IMAGES_DIR_NAME, url_object.name, img_name), 'wb') as file:
                 for chunk in img_raw.iter_content(chunk_size=1024):
                     file.write(chunk)
-                orm_list_of_images.append(Image(path=os.path.relpath(file.name, ROOT_DIR).encode("utf-8"), url=url_object))
+                orm_list_of_images.append(
+                    Image(path=os.path.relpath(file.name, ROOT_DIR).encode("utf-8"), url=url_object))
         except AttributeError:
             # Upon finding wrong 'src' in the list_of_images, just skip it
             continue
     return orm_list_of_images
 
 
+@celery.task(bind=True, autoretry_for=(Exception,), exponential_backoff=2, retry_kwargs={'max_retries': 3},
+             retry_jitter=False)
+def get_data_from_url(self, url_serialized_object):
+    """
+    Celery task for getting url data, also starts two child tasks
+    :param url_serialized_object: serialized Url object (refer to ORM models)
+    :return: response (json)
+    """
+    try:
+        response = requests.get(url_serialized_object["url"])
+    except requests.exceptions.MissingSchema:
+        return f"Invalid URL provided: {url_serialized_object['url']}"
+    if not response.ok:
+        raise Exception(f'GET {url_serialized_object["url"]} returned unexpected response code: {response.status_code}')
+    parse_and_add_data_to_database.delay(response.text, url_serialized_object)
+    tar_images.delay(url_serialized_object['name'])
+    return "Task finished"
+
+
 @celery.task
-def get_data_from_url(url_serialized_object):
+def parse_and_add_data_to_database(response_text, url_serialized_object):
     """
     Celery task for saving data in the system and adding it to the database
+    :param response_text: text response of URL get
     :param url_serialized_object: serialized Url object (refer to ORM models)
     :return: message "Task finished"
     """
     url_schema = UrlSchema()
     url_object = url_schema.load(url_serialized_object, session=db.session)
-    soup = BeautifulSoup(requests.get(url_object.url).text, "html.parser")
+    soup = BeautifulSoup(response_text, "html.parser")
     os.makedirs(os.path.join(ROOT_DIR, IMAGES_DIR_NAME, url_object.name), exist_ok=True)
-
     db.session.add(TextContent(text=parse_text_from_soup(soup).encode("utf-8"), url=url_object))
     db.session.add_all(get_list_of_images(soup, url_object))
-    db.session.commit()
-
-    tar_images.delay(url_object.name)
+    commit_to_database()
     return "Task finished"
 
 
@@ -89,8 +109,16 @@ def tar_images(name):
     :param name: name from the currently processed Url object
     :return: message that archive is created
     """
-    tar_path = os.path.join(ROOT_DIR, IMAGES_DIR_NAME, f'{name}.tar')
-    print(tar_path)
     with tarfile.open(os.path.join(IMAGES_DIR_NAME, f'{name}.tar'), 'w') as tar:
         tar.add(os.path.join(IMAGES_DIR_NAME, name))
     return f"Archive {name}.tar created"
+
+
+@after_task_publish.connect
+def update_sent_state(sender=None, headers=None, **kwargs):
+    """
+    Function changing "PENDING" state to "SENT" when the task is in progress.
+    """
+    task = celery.tasks.get(sender)
+    backend = task.backend if task else celery.backend
+    backend.store_result(headers['id'], None, "SENT")

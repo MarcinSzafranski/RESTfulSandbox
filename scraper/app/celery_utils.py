@@ -24,6 +24,3 @@ def init_celery(celery, app):
             db.session.remove()
     celery.task_cls = DBTask
 
-
-
-

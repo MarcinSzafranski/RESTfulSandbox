@@ -1,10 +1,12 @@
 """
 Module for database settings and its initialization.
 """
-from app import db, ma
-from definitions import ROOT_DIR, IMAGES_DIR_NAME
-import shutil
 import os
+import shutil
+from sqlalchemy import exc
+from werkzeug.exceptions import HTTPException
+from definitions import ROOT_DIR, IMAGES_DIR_NAME
+from app import db, ma
 
 
 def init_database(app):
@@ -23,3 +25,24 @@ def init_database(app):
         from .models import Url, Image, TextContent
         db.create_all()
         ma.init_app(app)
+        app.register_error_handler(DatabaseException, 500)
+
+
+def commit_to_database():
+    """
+    Function to commit to the database and handle exceptions.
+    """
+    try:
+        db.session.commit()
+    except exc.SQLAlchemyError:
+        db.session.rollback()
+        raise DatabaseException
+
+
+class DatabaseException(HTTPException):
+    """
+    Raised when database transaction went wrong
+    """
+    code = 500
+    description = 'Database transaction went wrong. Try using different data.'
+    pass
